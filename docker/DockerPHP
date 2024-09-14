@@ -1,0 +1,35 @@
+FROM php:8-apache as production
+
+RUN apt-get update \
+        && apt-get install -y \
+        libxml2-dev \
+        git \
+        zip \
+        zlib1g-dev \
+        libicu-dev \
+        g++ \
+        libpq-dev \
+        libpng-dev \
+        libzip-dev \
+        && docker-php-ext-install \
+        intl \
+        pdo \
+        pdo_mysql \
+        gd \
+        zip \
+        bcmath \
+        && apt-get clean all \
+        && rm -rvf /var/lib/apt/lists/* \
+    && php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');" \
+    && php composer-setup.php \
+    && php -r "unlink('composer-setup.php');" \
+    && mv composer.phar /usr/local/bin/composer
+
+#copy all files
+COPY .. /var/www/html/
+
+#install dependencies
+RUN composer install --no-dev --classmap-authoritative --no-progress
+
+#run apache
+RUN a2enmod rewrite

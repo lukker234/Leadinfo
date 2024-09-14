@@ -1,0 +1,13 @@
+{
+    "name": "leadinfo/excercise",
+    "type": "project",
+    "autoload": {
+        "psr-4": {
+            "Leadinfo\\Excercise\\": "src/"
+        }
+    },
+    "require": {
+        "slim/slim": "^4.10",
+        "slim/psr7": "^1.5"
+    }
+}
