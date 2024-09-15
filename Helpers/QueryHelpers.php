@@ -24,7 +24,7 @@ class QueryHelpers {
         $queryParams = [];
 
         foreach ($filter as $field => $value) {
-            if ($field === 'name') {
+            if ($field === 'name' || $field === 'city') {
                 $filterClauses[] = "$table.$field LIKE ?";
                 $queryParams[] = "%$value%";
             } else {
