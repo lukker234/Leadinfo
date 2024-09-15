@@ -45,50 +45,75 @@ class CompanyController {
         $filter = $this->extractFilter($request);
         $sort = $this->extractSort($request);
 
-        // If no filter or sort params are provided, return all companies from all tables
-        if (empty($filter)) {
-            return $this->getAllCompanies($request, $response);
+        // Check if there's a country filter
+        if (isset($filter['country'])) {
+            // Apply filtering and sorting using buildQuery
+            [$query, $queryParams] = $this->buildQuery($request, $filter, $sort);
+
+            // Prepare and execute the query
+            $stmt = $this->db->prepare($query);
+            $stmt->execute($queryParams);
+            $result = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } else {
+            // If no country filter, get all companies from all tables
+            $result = $this->getAllCompanies($request, $filter, $sort);
         }
-
-        // Otherwise, apply filtering and sorting using buildQuery
-        [$query, $queryParams] = $this->buildQuery($request, $filter, $sort);
-
-        // Prepare and execute the query
-        $stmt = $this->db->prepare($query);
-        $stmt->execute($queryParams);
-        $result = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         return $this->returnJSON($result, $response);
     }
 
     // Function to fetch all companies from all country-specific tables
-    public function getAllCompanies(Request $request, Response $response): Response {
+    public function getAllCompanies(Request $request, array $filter = [], array $sort = []): array {
         // Query to get all country-specific tables (those starting with 'company_%')
         $tablesQuery = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'db' AND table_name LIKE 'company_%'";
         $tablesStmt = $this->db->query($tablesQuery);
         $tables = $tablesStmt->fetchAll(PDO::FETCH_COLUMN);
     
         $queries = [];
+        $queryParams = []; // Initialize queryParams here
+    
         foreach ($tables as $table) {
-            // Dynamically build queries for each country-specific table
-            $queries[] = "SELECT company.id, '$table' AS table_name, $table.name, $table.city, $table.country 
-                          FROM company 
-                          INNER JOIN $table ON company.data_table = '$table' 
-                          AND company.data_unique_id = $table.unique_id";
+            // Base query for each table
+            $query = "SELECT company.id, '$table' AS table_name, $table.*
+                      FROM company 
+                      INNER JOIN $table ON company.data_table = '$table' 
+                      AND company.data_unique_id = $table.unique_id";
+    
+            // Filter by each field (if provided)
+            $filterClauses = [];
+            foreach ($filter as $field => $value) {
+                if ($field === 'name') {
+                    // Special case for name, use LIKE
+                    $filterClauses[] = "$table.$field LIKE ?";
+                    $queryParams[] = "%$value%";
+                } else {
+                    // General case for other fields
+                    $filterClauses[] = "$table.$field = ?";
+                    $queryParams[] = $value;
+                }
+            }
+    
+            // Add WHERE clauses to each individual query if filters are provided
+            if (!empty($filterClauses)) {
+                $query .= ' WHERE ' . implode(' AND ', $filterClauses);
+            }
+    
+            // Add the query to the list
+            $queries[] = $query;
         }
     
         if (empty($queries)) {
             throw new Exception('No relevant tables found.');
         }
     
-        // Combine all queries with UNION
+        // Combine all queries with UNION ALL
         $combinedQuery = implode(" UNION ALL ", $queries);
     
         // Apply sorting if provided
-        $sort = $this->extractSort($request); // Use the extracted sort
         if (!empty($sort)) {
             $sortClauses = [];
             foreach ($sort as $column => $direction) {
+                // Sort by columns present in the results
                 $sortClauses[] = "$column " . strtoupper($direction);
             }
             if (!empty($sortClauses)) {
@@ -96,16 +121,12 @@ class CompanyController {
             }
         }
     
-        $query = "SELECT * FROM ($combinedQuery) AS combined_results";
-    
-        $stmt = $this->db->prepare($query);
-        $stmt->execute();
-        $result = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
-        return $this->returnJSON($result, $response);
+        // Prepare and execute the final combined query
+        $stmt = $this->db->prepare($combinedQuery);
+        $stmt->execute($queryParams);
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
     
-
     // Function to build dynamic queries for filtering and sorting
     private function buildQuery(Request $request, array $filter, array $sort): array {
         $whereClauses = [];
@@ -115,14 +136,21 @@ class CompanyController {
         $table = $this->getTable($request);
 
         // Base query: Select from 'company' table and join the country-specific table
-        $baseQuery = "SELECT company.id, $table.name, $table.city, $table.country
+        $baseQuery = "SELECT company.id, $table.*
                       FROM company 
                       INNER JOIN $table ON company.data_table = '$table' AND company.data_unique_id = $table.unique_id";
 
-        // Filter by name (if provided)
-        if (isset($filter['name'])) {
-            $whereClauses[] = "$table.name LIKE ?";
-            $queryParams[] = '%' . $filter['name'] . '%';
+        // Filter by each field (if provided)
+        foreach ($filter as $field => $value) {
+            if ($field === 'name') {
+                // Special case for name, use LIKE
+                $whereClauses[] = "$table.$field LIKE ?";
+                $queryParams[] = "%$value%";
+            } else {
+                // General case for other fields
+                $whereClauses[] = "$table.$field = ?";
+                $queryParams[] = $value;
+            }
         }
 
         // Add WHERE clauses to the query
@@ -134,6 +162,7 @@ class CompanyController {
         if (!empty($sort)) {
             $sortClauses = [];
             foreach ($sort as $column => $direction) {
+                // Make sure to sort by fields present in the table
                 $sortClauses[] = "$table.$column " . strtoupper($direction);
             }
             if (!empty($sortClauses)) {
