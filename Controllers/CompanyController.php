@@ -6,6 +6,7 @@ use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 use PDO;
 use Exception;
+use App\Helpers\QueryHelpers;
 
 class CompanyController {
     protected $db;
@@ -15,62 +16,12 @@ class CompanyController {
         $this->db = $db;
     }
 
-    // Helper function to extract filter parameters
-    private function extractFilter(Request $request): array {
-        $params = $request->getQueryParams();
-        return isset($params['filter']) ? $params['filter'] : [];
-    }
-
-    // Helper function to extract sort parameters
-    private function extractSort(Request $request): array {
-        $params = $request->getQueryParams();
-        return isset($params['sort']) ? $params['sort'] : [];
-    }
-
-    // Determine the correct country-specific table
-    private function getTable(Request $request): string {
-        $filter = $this->extractFilter($request);
-        return isset($filter['country']) 
-            ? strtolower('company_' . $filter['country']) 
-            : 'company_nl'; // Default to 'company_nl' if no country filter
-    }
-
-    // Apply filters to the query
-    private function applyFilters(string $table, array $filter): array {
-        $filterClauses = [];
-        $queryParams = [];
-
-        foreach ($filter as $field => $value) {
-            if ($field === 'name') {
-                $filterClauses[] = "$table.$field LIKE ?";
-                $queryParams[] = "%$value%";
-            } else {
-                $filterClauses[] = "$table.$field = ?";
-                $queryParams[] = $value;
-            }
-        }
-
-        return [$filterClauses, $queryParams];
-    }
-
-    // Apply sorting to the query
-    private function applySort(string $table, array $sort): string {
-        $sortClauses = [];
-        
-        foreach ($sort as $column => $direction) {
-            $sortClauses[] = "$table.$column " . strtoupper($direction);
-        }
-
-        return !empty($sortClauses) ? ' ORDER BY ' . implode(', ', $sortClauses) : '';
-    }
-
-    // Helper function to return JSON response
     private function returnJSON(array $result, Response $response): Response {
         $response->getBody()->write(json_encode($result, JSON_PRETTY_PRINT));
         return $response->withHeader('Content-Type', 'application/json');
     }
 
-    // Fetch all country-specific table names and cache them
+    // Fetch and cache table names from the database.
     private function getTableNames(): array {
         if ($this->tableNamesCache === null) {
             $tablesQuery = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'db' AND table_name LIKE 'company_%'";
@@ -80,107 +31,83 @@ class CompanyController {
         return $this->tableNamesCache;
     }
 
-    // Main function to get companies (either filtered or all)
+    // Get the appropriate table name based on the country filter.
+    private function getTable(Request $request): string {
+        $filter = QueryHelpers::extractFilter($request);
+        return isset($filter['country']) 
+            ? strtolower('company_' . $filter['country']) 
+            : 'company_nl'; // Default to 'company_nl' if no country filter
+    }
+
+    // Retrieve companies based on filters and sorting.
     public function getCompanies(Request $request, Response $response): Response {
-        $filter = $this->extractFilter($request);
-        $sort = $this->extractSort($request);
+        $filter = QueryHelpers::extractFilter($request);
+        $sort = QueryHelpers::extractSort($request);
 
-        // Check if there's a country filter
         if (isset($filter['country'])) {
-            // Apply filtering and sorting using buildQuery
             [$query, $queryParams] = $this->buildQuery($request, $filter, $sort);
-
-            // Prepare and execute the query
             $stmt = $this->db->prepare($query);
             $stmt->execute($queryParams);
             $result = $stmt->fetchAll(PDO::FETCH_ASSOC);
         } else {
-            // If no country filter, get all companies from all tables
             $result = $this->getAllCompanies($request, $filter, $sort);
         }
 
         return $this->returnJSON($result, $response);
     }
 
-    // Function to fetch all companies from all country-specific tables
+    // Fetch all companies from all country-specific tables.
     public function getAllCompanies(Request $request, array $filter = [], array $sort = []): array {
-        // Get cached table names
         $tables = $this->getTableNames();
-        
         $queries = [];
-        $queryParams = []; // Initialize queryParams here
-        
+        $queryParams = [];
+
         foreach ($tables as $table) {
-            // Base query for each table
             $query = "SELECT company.id, '$table' AS table_name, $table.*
-                    FROM company 
-                    INNER JOIN $table ON company.data_table = '$table' 
-                    AND company.data_unique_id = $table.unique_id";
-        
-            // Apply filters
-            [$filterClauses, $filterParams] = $this->applyFilters($table, $filter);
+                      FROM company 
+                      INNER JOIN $table ON company.data_table = '$table' 
+                      AND company.data_unique_id = $table.unique_id";
+
+            [$filterClauses, $filterParams] = QueryHelpers::applyFilters($table, $filter);
             $queryParams = array_merge($queryParams, $filterParams);
-        
-            // Add WHERE clauses to each individual query if filters are provided
+
             if (!empty($filterClauses)) {
                 $query .= ' WHERE ' . implode(' AND ', $filterClauses);
             }
-        
-            // Add the query to the list
+
             $queries[] = $query;
         }
-        
+
         if (empty($queries)) {
             throw new Exception('No relevant tables found.');
         }
-        
-        // Combine all queries with UNION ALL
-        $combinedQuery = implode(" UNION ALL ", $queries);
-        
-        // Apply sorting to columns that are guaranteed to be present in the results
-        if (!empty($sort)) {
-            $sortClauses = [];
-            foreach ($sort as $column => $direction) {
-                // Check if the column is present in the tables
-                $sortClauses[] = "$column " . strtoupper($direction);
-            }
-            if (!empty($sortClauses)) {
-                $combinedQuery .= ' ORDER BY ' . implode(', ', $sortClauses);
-            }
-        }
-        
-        // Prepare and execute the final combined query
+
+        $combinedQuery = "SELECT * FROM (" . implode(" UNION ALL ", $queries) . ") AS combined";
+        $combinedQuery .= QueryHelpers::applySort('combined', $sort);
+
         $stmt = $this->db->prepare($combinedQuery);
         $stmt->execute($queryParams);
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
-    // Function to build dynamic queries for filtering and sorting
+    // Build the query with filtering and sorting based on the request.
     private function buildQuery(Request $request, array $filter, array $sort): array {
         $whereClauses = [];
         $queryParams = [];
 
-        // Determine the correct table (e.g., company_nl, company_us)
         $table = $this->getTable($request);
-
-        // Base query: Select from 'company' table and join the country-specific table
         $baseQuery = "SELECT company.id, $table.*
                       FROM company 
                       INNER JOIN $table ON company.data_table = '$table' AND company.data_unique_id = $table.unique_id";
 
-        // Apply filters
-        [$filterClauses, $filterParams] = $this->applyFilters($table, $filter);
+        [$filterClauses, $filterParams] = QueryHelpers::applyFilters($table, $filter);
         $queryParams = array_merge($queryParams, $filterParams);
 
-        // Add WHERE clauses to the query
         if (!empty($filterClauses)) {
             $baseQuery .= ' WHERE ' . implode(' AND ', $filterClauses);
         }
 
-        // Apply sorting
-        $baseQuery .= $this->applySort($table, $sort);
-
-        // Return both the query string and the parameters
+        $baseQuery .= QueryHelpers::applySort($table, $sort);
         return [$baseQuery, $queryParams];
     }
 }
