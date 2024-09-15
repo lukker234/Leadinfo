@@ -9,6 +9,7 @@ use Exception;
 
 class CompanyController {
     protected $db;
+    private $tableNamesCache = null;
 
     public function __construct(PDO $db) {
         $this->db = $db;
@@ -69,6 +70,16 @@ class CompanyController {
         return $response->withHeader('Content-Type', 'application/json');
     }
 
+    // Fetch all country-specific table names and cache them
+    private function getTableNames(): array {
+        if ($this->tableNamesCache === null) {
+            $tablesQuery = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'db' AND table_name LIKE 'company_%'";
+            $tablesStmt = $this->db->query($tablesQuery);
+            $this->tableNamesCache = $tablesStmt->fetchAll(PDO::FETCH_COLUMN);
+        }
+        return $this->tableNamesCache;
+    }
+
     // Main function to get companies (either filtered or all)
     public function getCompanies(Request $request, Response $response): Response {
         $filter = $this->extractFilter($request);
@@ -93,10 +104,8 @@ class CompanyController {
 
     // Function to fetch all companies from all country-specific tables
     public function getAllCompanies(Request $request, array $filter = [], array $sort = []): array {
-        // Query to get all country-specific tables (those starting with 'company_%')
-        $tablesQuery = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'db' AND table_name LIKE 'company_%'";
-        $tablesStmt = $this->db->query($tablesQuery);
-        $tables = $tablesStmt->fetchAll(PDO::FETCH_COLUMN);
+        // Get cached table names
+        $tables = $this->getTableNames();
         
         $queries = [];
         $queryParams = []; // Initialize queryParams here
@@ -146,7 +155,6 @@ class CompanyController {
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
-    
     // Function to build dynamic queries for filtering and sorting
     private function buildQuery(Request $request, array $filter, array $sort): array {
         $whereClauses = [];
