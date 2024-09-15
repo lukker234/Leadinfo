@@ -3,11 +3,12 @@
     "type": "project",
     "autoload": {
         "psr-4": {
-            "Leadinfo\\Excercise\\": "src/"
+            "App\\Controllers\\": "Controllers/"
         }
     },
     "require": {
         "slim/slim": "^4.10",
-        "slim/psr7": "^1.5"
+        "slim/psr7": "^1.5",
+        "php-di/php-di": "^7.0"
     }
 }
