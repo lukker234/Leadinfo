@@ -34,6 +34,35 @@ class CompanyController {
             : 'company_nl'; // Default to 'company_nl' if no country filter
     }
 
+    // Apply filters to the query
+    private function applyFilters(string $table, array $filter): array {
+        $filterClauses = [];
+        $queryParams = [];
+
+        foreach ($filter as $field => $value) {
+            if ($field === 'name') {
+                $filterClauses[] = "$table.$field LIKE ?";
+                $queryParams[] = "%$value%";
+            } else {
+                $filterClauses[] = "$table.$field = ?";
+                $queryParams[] = $value;
+            }
+        }
+
+        return [$filterClauses, $queryParams];
+    }
+
+    // Apply sorting to the query
+    private function applySort(string $table, array $sort): string {
+        $sortClauses = [];
+        
+        foreach ($sort as $column => $direction) {
+            $sortClauses[] = "$table.$column " . strtoupper($direction);
+        }
+
+        return !empty($sortClauses) ? ' ORDER BY ' . implode(', ', $sortClauses) : '';
+    }
+
     // Helper function to return JSON response
     private function returnJSON(array $result, Response $response): Response {
         $response->getBody()->write(json_encode($result, JSON_PRETTY_PRINT));
@@ -68,64 +97,55 @@ class CompanyController {
         $tablesQuery = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'db' AND table_name LIKE 'company_%'";
         $tablesStmt = $this->db->query($tablesQuery);
         $tables = $tablesStmt->fetchAll(PDO::FETCH_COLUMN);
-    
+        
         $queries = [];
         $queryParams = []; // Initialize queryParams here
-    
+        
         foreach ($tables as $table) {
             // Base query for each table
             $query = "SELECT company.id, '$table' AS table_name, $table.*
-                      FROM company 
-                      INNER JOIN $table ON company.data_table = '$table' 
-                      AND company.data_unique_id = $table.unique_id";
-    
-            // Filter by each field (if provided)
-            $filterClauses = [];
-            foreach ($filter as $field => $value) {
-                if ($field === 'name') {
-                    // Special case for name, use LIKE
-                    $filterClauses[] = "$table.$field LIKE ?";
-                    $queryParams[] = "%$value%";
-                } else {
-                    // General case for other fields
-                    $filterClauses[] = "$table.$field = ?";
-                    $queryParams[] = $value;
-                }
-            }
-    
+                    FROM company 
+                    INNER JOIN $table ON company.data_table = '$table' 
+                    AND company.data_unique_id = $table.unique_id";
+        
+            // Apply filters
+            [$filterClauses, $filterParams] = $this->applyFilters($table, $filter);
+            $queryParams = array_merge($queryParams, $filterParams);
+        
             // Add WHERE clauses to each individual query if filters are provided
             if (!empty($filterClauses)) {
                 $query .= ' WHERE ' . implode(' AND ', $filterClauses);
             }
-    
+        
             // Add the query to the list
             $queries[] = $query;
         }
-    
+        
         if (empty($queries)) {
             throw new Exception('No relevant tables found.');
         }
-    
+        
         // Combine all queries with UNION ALL
         $combinedQuery = implode(" UNION ALL ", $queries);
-    
-        // Apply sorting if provided
+        
+        // Apply sorting to columns that are guaranteed to be present in the results
         if (!empty($sort)) {
             $sortClauses = [];
             foreach ($sort as $column => $direction) {
-                // Sort by columns present in the results
+                // Check if the column is present in the tables
                 $sortClauses[] = "$column " . strtoupper($direction);
             }
             if (!empty($sortClauses)) {
                 $combinedQuery .= ' ORDER BY ' . implode(', ', $sortClauses);
             }
         }
-    
+        
         // Prepare and execute the final combined query
         $stmt = $this->db->prepare($combinedQuery);
         $stmt->execute($queryParams);
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
+
     
     // Function to build dynamic queries for filtering and sorting
     private function buildQuery(Request $request, array $filter, array $sort): array {
@@ -140,35 +160,17 @@ class CompanyController {
                       FROM company 
                       INNER JOIN $table ON company.data_table = '$table' AND company.data_unique_id = $table.unique_id";
 
-        // Filter by each field (if provided)
-        foreach ($filter as $field => $value) {
-            if ($field === 'name') {
-                // Special case for name, use LIKE
-                $whereClauses[] = "$table.$field LIKE ?";
-                $queryParams[] = "%$value%";
-            } else {
-                // General case for other fields
-                $whereClauses[] = "$table.$field = ?";
-                $queryParams[] = $value;
-            }
-        }
+        // Apply filters
+        [$filterClauses, $filterParams] = $this->applyFilters($table, $filter);
+        $queryParams = array_merge($queryParams, $filterParams);
 
         // Add WHERE clauses to the query
-        if (!empty($whereClauses)) {
-            $baseQuery .= ' WHERE ' . implode(' AND ', $whereClauses);
+        if (!empty($filterClauses)) {
+            $baseQuery .= ' WHERE ' . implode(' AND ', $filterClauses);
         }
 
-        // Sort by columns (if sorting is provided)
-        if (!empty($sort)) {
-            $sortClauses = [];
-            foreach ($sort as $column => $direction) {
-                // Make sure to sort by fields present in the table
-                $sortClauses[] = "$table.$column " . strtoupper($direction);
-            }
-            if (!empty($sortClauses)) {
-                $baseQuery .= ' ORDER BY ' . implode(', ', $sortClauses);
-            }
-        }
+        // Apply sorting
+        $baseQuery .= $this->applySort($table, $sort);
 
         // Return both the query string and the parameters
         return [$baseQuery, $queryParams];
